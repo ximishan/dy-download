@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import shutil
 import sys
 from pathlib import Path
 from urllib.parse import urlparse
@@ -13,14 +14,24 @@ UPSTREAM_DIRNAME = "vendor/douyin-downloader"
 class BackendManager:
     def __init__(self, project_root: Path):
         self.project_root = project_root
+        self.resource_root = Path(getattr(sys, "_MEIPASS", project_root))
         self.backend_dir = project_root / UPSTREAM_DIRNAME
         self.runtime_dir = project_root / ".runtime"
         self.runtime_dir.mkdir(parents=True, exist_ok=True)
         self.config_path = self.runtime_dir / "config.yml"
         self.scan_path = self.runtime_dir / "scan.json"
 
+    def _python(self) -> str:
+        if getattr(sys, "frozen", False):
+            found = shutil.which("python") or shutil.which("py")
+            if not found:
+                raise RuntimeError("EXE 版本当前仍需要系统安装 Python 3.10+。")
+            return found
+        return sys.executable
+
     def prepare_command(self) -> tuple[list[str], Path]:
-        return [sys.executable, str(self.project_root / "bootstrap_backend.py")], self.project_root
+        script = self.resource_root / "bootstrap_backend.py"
+        return [self._python(), str(script)], self.project_root
 
     def ensure_backend(self):
         if not (self.backend_dir / "run.py").exists():
@@ -36,15 +47,16 @@ class BackendManager:
                 threads=5,
                 browser_fallback=True,
             )
-        return [sys.executable, "-m", "tools.cookie_fetcher", "--config", str(self.config_path)], self.backend_dir
+        return [self._python(), "-m", "tools.cookie_fetcher", "--config", str(self.config_path)], self.backend_dir
 
     def scan_command(self, url: str, limit: int = 0) -> tuple[list[str], Path]:
         self.ensure_backend()
         if not self.config_path.exists():
-            raise RuntimeError("请先点击“浏览器登录获取 Cookie”。")
+            raise RuntimeError("请先点击“浏览器登录获取 Cookie”或手动填写 Cookie。")
+        script = self.resource_root / "scan_profile.py"
         cmd = [
-            sys.executable,
-            str(self.project_root / "scan_profile.py"),
+            self._python(),
+            str(script),
             "--url",
             url,
             "--config",
@@ -58,7 +70,7 @@ class BackendManager:
 
     def download_command(self, config_path: Path) -> tuple[list[str], Path]:
         self.ensure_backend()
-        return [sys.executable, "run.py", "-c", str(config_path)], self.backend_dir
+        return [self._python(), "run.py", "-c", str(config_path)], self.backend_dir
 
     def write_profile_config(
         self,
@@ -91,8 +103,7 @@ class BackendManager:
             aweme_id = str(item.get("aweme_id") or "").strip()
             if not aweme_id:
                 continue
-            item_type = item.get("type")
-            if item_type == "图文":
+            if item.get("type") == "图文":
                 links.append(f"https://www.douyin.com/note/{aweme_id}")
             else:
                 links.append(f"https://www.douyin.com/video/{aweme_id}")
@@ -129,14 +140,22 @@ class BackendManager:
         cookies = self._read_existing_config().get("cookies", {})
         if not isinstance(cookies, dict) or not cookies:
             return "未配置"
-        important = [k for k in ("sessionid", "sid_guard", "ttwid", "msToken", "passport_csrf_token") if cookies.get(k)]
+        important = [
+            k
+            for k in ("sessionid", "sid_guard", "ttwid", "msToken", "passport_csrf_token")
+            if cookies.get(k)
+        ]
         return f"已配置 {len(cookies)} 项" + (f"（{', '.join(important)}）" if important else "")
 
     @staticmethod
     def validate_profile_url(url: str) -> bool:
         try:
             parsed = urlparse(url.strip())
-            return parsed.scheme in {"http", "https"} and "douyin.com" in parsed.netloc and "/user/" in parsed.path
+            return (
+                parsed.scheme in {"http", "https"}
+                and "douyin.com" in parsed.netloc
+                and "/user/" in parsed.path
+            )
         except Exception:
             return False
 
