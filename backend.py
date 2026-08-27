@@ -149,13 +149,15 @@ class BackendManager:
 
     @staticmethod
     def validate_profile_url(url: str) -> bool:
+        """Accept both full profile URLs and Douyin profile share short links."""
         try:
             parsed = urlparse(url.strip())
-            return (
-                parsed.scheme in {"http", "https"}
-                and "douyin.com" in parsed.netloc
-                and "/user/" in parsed.path
-            )
+            if parsed.scheme not in {"http", "https"}:
+                return False
+            host = parsed.netloc.lower().split(":", 1)[0]
+            if host in {"v.douyin.com", "v.iesdouyin.com"}:
+                return True
+            return host.endswith("douyin.com") and "/user/" in parsed.path
         except Exception:
             return False
 
