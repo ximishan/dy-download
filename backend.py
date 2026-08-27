@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 import re
 import shutil
 import sys
@@ -21,6 +22,7 @@ class BackendManager:
         self.runtime_dir.mkdir(parents=True, exist_ok=True)
         self.config_path = self.runtime_dir / "config.yml"
         self.scan_path = self.runtime_dir / "scan.json"
+        self.risk_state_path = self.runtime_dir / "risk_state.json"
 
     def _python(self) -> str:
         if getattr(sys, "frozen", False):
@@ -58,7 +60,6 @@ class BackendManager:
         raw = (text or "").strip()
         if not raw:
             return ""
-
         match = re.search(
             r"https?://(?:[A-Za-z0-9-]+\.)?(?:douyin\.com|iesdouyin\.com)(?:/[^\s]*)?",
             raw,
@@ -66,7 +67,6 @@ class BackendManager:
         )
         if match:
             return match.group(0).rstrip("，。！？；;,.!?)）]】>\"'")
-
         match = re.search(
             r"(?:v\.douyin\.com|v\.iesdouyin\.com)/[^\s]+",
             raw,
@@ -74,81 +74,84 @@ class BackendManager:
         )
         if match:
             return "https://" + match.group(0).rstrip("，。！？；;,.!?)）]】>\"'")
-
         return ""
 
     def scan_command(self, url: str, limit: int = 0) -> tuple[list[str], Path]:
         self.ensure_backend()
         if not self.config_path.exists():
             raise RuntimeError("请先点击“浏览器登录获取 Cookie”或手动填写 Cookie。")
-
         extracted_url = self.extract_douyin_url(url)
         if not extracted_url:
             raise RuntimeError("没有从输入内容中找到有效的抖音链接。")
-
         script = self.resource_root / "scan_profile.py"
         cmd = self._python_cmd(
-            str(script),
-            "--url",
-            extracted_url,
-            "--config",
-            str(self.config_path),
-            "--output",
-            str(self.scan_path),
+            str(script), "--url", extracted_url, "--config", str(self.config_path),
+            "--output", str(self.scan_path),
         )
         if limit > 0:
             cmd += ["--limit", str(limit)]
         return cmd, self.project_root
 
-    def download_command(self, config_path: Path) -> tuple[list[str], Path]:
+    def download_command(self, config_path: Path | None = None) -> tuple[list[str], Path]:
         self.ensure_backend()
+        config_path = config_path or self.config_path
         watchdog = self.resource_root / "safe_download.py"
-        return self._python_cmd(str(watchdog), "--config", str(config_path)), self.project_root
+        return self._python_cmd(
+            str(watchdog), "--config", str(config_path), "--risk-state", str(self.risk_state_path)
+        ), self.project_root
 
-    def write_profile_config(
-        self,
-        *,
-        url: str,
-        output_dir: Path,
-        count: int,
-        threads: int,
-        browser_fallback: bool,
-    ) -> Path:
+    def can_resume_download(self) -> bool:
+        data = self._read_existing_config()
+        links = data.get("link") or [] if isinstance(data, dict) else []
+        return bool(links)
+
+    def read_risk_state(self) -> dict:
+        if not self.risk_state_path.exists():
+            return {
+                "level": "low",
+                "status": "等待下载",
+                "reason": "暂无风控信号",
+                "risk_hits": 0,
+                "needs_login": False,
+            }
+        try:
+            data = json.loads(self.risk_state_path.read_text(encoding="utf-8"))
+            return data if isinstance(data, dict) else {}
+        except Exception:
+            return {}
+
+    def clear_risk_state(self) -> None:
+        state = {
+            "level": "low",
+            "status": "已恢复",
+            "reason": "新的登录态已就绪",
+            "risk_hits": 0,
+            "needs_login": False,
+        }
+        self.risk_state_path.write_text(json.dumps(state, ensure_ascii=False, indent=2), encoding="utf-8")
+
+    def write_profile_config(self, *, url: str, output_dir: Path, count: int, threads: int, browser_fallback: bool) -> Path:
         return self._write_config(
-            links=[url],
-            output_dir=output_dir,
-            threads=threads,
-            browser_fallback=browser_fallback,
-            mode=["post"],
-            post_count=count,
+            links=[url], output_dir=output_dir, threads=threads,
+            browser_fallback=browser_fallback, mode=["post"], post_count=count,
         )
 
-    def write_selected_config(
-        self,
-        *,
-        items: list[dict],
-        output_dir: Path,
-        threads: int,
-        browser_fallback: bool,
-    ) -> Path:
+    def write_selected_config(self, *, items: list[dict], output_dir: Path, threads: int, browser_fallback: bool) -> Path:
         links: list[str] = []
         for item in items:
             aweme_id = str(item.get("aweme_id") or "").strip()
             if not aweme_id:
                 continue
-            if item.get("type") == "图文":
-                links.append(f"https://www.douyin.com/note/{aweme_id}")
-            else:
-                links.append(f"https://www.douyin.com/video/{aweme_id}")
+            links.append(
+                f"https://www.douyin.com/note/{aweme_id}"
+                if item.get("type") == "图文"
+                else f"https://www.douyin.com/video/{aweme_id}"
+            )
         if not links:
             raise RuntimeError("没有可下载的作品。")
         return self._write_config(
-            links=links,
-            output_dir=output_dir,
-            threads=threads,
-            browser_fallback=browser_fallback,
-            mode=["post"],
-            post_count=0,
+            links=links, output_dir=output_dir, threads=threads,
+            browser_fallback=browser_fallback, mode=["post"], post_count=0,
         )
 
     def save_manual_cookie(self, cookie_text: str) -> None:
@@ -168,22 +171,20 @@ class BackendManager:
         data = self._read_existing_config()
         data["cookies"] = parsed
         self._dump_config(data)
+        self.clear_risk_state()
 
     def cookie_summary(self) -> str:
         cookies = self._read_existing_config().get("cookies", {})
         if not isinstance(cookies, dict) or not cookies:
             return "未配置"
-
         required = ("ttwid", "odin_tt", "passport_csrf_token")
         login_keys = ("sessionid", "sessionid_ss", "sid_guard")
         missing = [key for key in required if not cookies.get(key)]
         has_login = any(cookies.get(key) for key in login_keys)
-
         if missing:
             return f"风险：缺少 {', '.join(missing)}"
         if not has_login:
             return "风险：未检测到有效登录会话"
-
         important = [
             k for k in ("sessionid", "sid_guard", "ttwid", "msToken", "passport_csrf_token")
             if cookies.get(k)
@@ -208,16 +209,7 @@ class BackendManager:
         except Exception:
             return False
 
-    def _write_config(
-        self,
-        *,
-        links: list[str],
-        output_dir: Path,
-        threads: int,
-        browser_fallback: bool,
-        mode: list[str],
-        post_count: int,
-    ) -> Path:
+    def _write_config(self, *, links: list[str], output_dir: Path, threads: int, browser_fallback: bool, mode: list[str], post_count: int) -> Path:
         previous = self._read_existing_config()
         cookies = previous.get("cookies", {}) if isinstance(previous, dict) else {}
         safe_threads = max(1, min(int(threads), 3))
@@ -225,14 +217,7 @@ class BackendManager:
             "link": links,
             "path": str(output_dir.resolve()),
             "mode": mode,
-            "number": {
-                "post": int(post_count),
-                "like": 0,
-                "mix": 0,
-                "music": 0,
-                "collect": 0,
-                "collectmix": 0,
-            },
+            "number": {"post": int(post_count), "like": 0, "mix": 0, "music": 0, "collect": 0, "collectmix": 0},
             "thread": safe_threads,
             "rate_limit": 1.2,
             "retry_times": 3,
@@ -242,11 +227,8 @@ class BackendManager:
             "progress": {"quiet_logs": False},
             "cookies": cookies or {},
             "browser_fallback": {
-                "enabled": bool(browser_fallback),
-                "headless": False,
-                "max_scrolls": 240,
-                "idle_rounds": 8,
-                "wait_timeout_seconds": 600,
+                "enabled": bool(browser_fallback), "headless": False,
+                "max_scrolls": 240, "idle_rounds": 8, "wait_timeout_seconds": 600,
             },
             "transcript": {"enabled": False},
         }
