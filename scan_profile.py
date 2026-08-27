@@ -5,6 +5,7 @@ import asyncio
 import json
 from pathlib import Path
 from typing import Any
+from urllib.parse import urlparse
 
 import yaml
 from playwright.async_api import Response, async_playwright
@@ -34,11 +35,21 @@ def load_cookies(config_path: Path) -> list[dict]:
     return cookies
 
 
-def normalize_aweme(raw: dict) -> dict | None:
+def sec_uid_from_url(url: str) -> str:
+    parts = [part for part in urlparse(url).path.split("/") if part]
+    if len(parts) >= 2 and parts[0] == "user":
+        return parts[1]
+    return ""
+
+
+def normalize_aweme(raw: dict, target_sec_uid: str) -> dict | None:
     aweme_id = str(raw.get("aweme_id") or raw.get("id") or "").strip()
     if not aweme_id:
         return None
     author = raw.get("author") or {}
+    author_sec_uid = str(author.get("sec_uid") or "").strip()
+    if target_sec_uid and target_sec_uid != "self" and author_sec_uid and author_sec_uid != target_sec_uid:
+        return None
     desc = str(raw.get("desc") or "").strip().replace("\n", " ")
     images = raw.get("images") or []
     aweme_type = raw.get("aweme_type")
@@ -48,7 +59,7 @@ def normalize_aweme(raw: dict) -> dict | None:
     cover = ""
     if is_gallery and images:
         first = images[0] or {}
-        url_list = (first.get("url_list") or first.get("download_url_list") or [])
+        url_list = first.get("url_list") or first.get("download_url_list") or []
         cover = str(url_list[0]) if url_list else ""
     else:
         video = raw.get("video") or {}
@@ -60,6 +71,7 @@ def normalize_aweme(raw: dict) -> dict | None:
         "type": "图文" if is_gallery else "视频",
         "title": desc or "（无标题）",
         "author": str(author.get("nickname") or ""),
+        "author_sec_uid": author_sec_uid,
         "create_time": int(create_time or 0),
         "digg_count": int(stats.get("digg_count") or 0),
         "comment_count": int(stats.get("comment_count") or 0),
@@ -73,6 +85,7 @@ async def scan(url: str, config_path: Path, output: Path, limit: int) -> int:
     items: dict[str, dict] = {}
     no_growth_rounds = 0
     has_more = True
+    target_sec_uid = sec_uid_from_url(url)
 
     async with async_playwright() as p:
         browser = await p.chromium.launch(headless=False)
@@ -91,7 +104,7 @@ async def scan(url: str, config_path: Path, output: Path, limit: int) -> int:
 
         async def handle_response(response: Response) -> None:
             nonlocal has_more
-            if "aweme/post" not in response.url and "/aweme/v1/web/" not in response.url:
+            if "/aweme/v1/web/aweme/post/" not in response.url and "aweme/post" not in response.url:
                 return
             try:
                 if "application/json" not in (response.headers.get("content-type") or ""):
@@ -105,7 +118,7 @@ async def scan(url: str, config_path: Path, output: Path, limit: int) -> int:
             for raw in raw_list:
                 if not isinstance(raw, dict):
                     continue
-                item = normalize_aweme(raw)
+                item = normalize_aweme(raw, target_sec_uid)
                 if item:
                     items[item["aweme_id"]] = item
             if "has_more" in data:
@@ -130,9 +143,8 @@ async def scan(url: str, config_path: Path, output: Path, limit: int) -> int:
                 emit("status", "检测到抖音安全验证，请在打开的浏览器中完成验证。")
                 break
 
-        max_scrolls = 260
         previous_count = -1
-        for index in range(max_scrolls):
+        for index in range(260):
             if limit > 0 and len(items) >= limit:
                 break
             await page.evaluate("window.scrollTo(0, document.body.scrollHeight)")
