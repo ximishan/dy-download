@@ -6,7 +6,7 @@ import json
 import sys
 from pathlib import Path
 from typing import Any
-from urllib.parse import urlparse
+from urllib.parse import parse_qs, urlparse
 
 import yaml
 from playwright.async_api import Response, async_playwright
@@ -49,26 +49,56 @@ def browser_cookies(cookie_dict: dict[str, str]) -> list[dict]:
 
 
 def sec_uid_from_url(url: str) -> str:
-    parts = [part for part in urlparse(url).path.split("/") if part]
-    if len(parts) >= 2 and parts[0] == "user":
-        return parts[1]
+    """Extract sec_uid from all known Douyin user/share URL shapes.
+
+    Supported examples:
+      https://www.douyin.com/user/MS4w...
+      https://www.iesdouyin.com/share/user/MS4w...
+      ...?sec_uid=MS4w...
+    """
+    parsed = urlparse((url or "").strip())
+
+    # Prefer explicit query parameter when present.
+    query = parse_qs(parsed.query)
+    for key in ("sec_uid", "sec_user_id"):
+        values = query.get(key) or []
+        if values and str(values[0]).strip():
+            return str(values[0]).strip()
+
+    parts = [part for part in parsed.path.split("/") if part]
+    for index, part in enumerate(parts):
+        if part == "user" and index + 1 < len(parts):
+            return parts[index + 1]
     return ""
 
 
-async def resolve_profile_url(url: str, cookies: dict[str, str]) -> str:
+def canonical_profile_url(sec_uid: str) -> str:
+    return f"https://www.douyin.com/user/{sec_uid}"
+
+
+async def resolve_profile_url(url: str, cookies: dict[str, str]) -> tuple[str, str]:
     candidate = (url or "").strip()
-    if not is_short_url(candidate):
-        return candidate
 
-    emit("status", "正在解析抖音分享短链接…")
-    async with DouyinAPIClient(cookies) as api_client:
-        resolved = await api_client.resolve_short_url(normalize_short_url(candidate))
+    if is_short_url(candidate):
+        emit("status", "正在解析抖音分享短链接…")
+        async with DouyinAPIClient(cookies) as api_client:
+            resolved = await api_client.resolve_short_url(normalize_short_url(candidate))
+        if not resolved:
+            raise RuntimeError("抖音分享短链接解析失败，请确认链接仍然有效。")
+        emit("log", f"短链接已展开：{resolved}")
+    else:
+        resolved = candidate
 
-    if not resolved:
-        raise RuntimeError("抖音分享短链接解析失败，请确认链接仍然有效。")
+    sec_uid = sec_uid_from_url(resolved)
+    if not sec_uid:
+        raise RuntimeError(
+            "这个链接没有识别出用户 sec_uid。请在目标用户主页点“分享 → 复制链接”后再粘贴。"
+        )
 
-    emit("log", f"短链接已展开：{resolved}")
-    return resolved
+    canonical = canonical_profile_url(sec_uid)
+    if canonical != resolved:
+        emit("log", f"标准主页地址：{canonical}")
+    return canonical, sec_uid
 
 
 def normalize_aweme(raw: dict, target_sec_uid: str) -> dict | None:
@@ -120,13 +150,7 @@ async def scan(url: str, config_path: Path, output: Path, limit: int) -> int:
     has_more = True
 
     cookie_dict = load_cookie_dict(config_path)
-    resolved_url = await resolve_profile_url(url, cookie_dict)
-    target_sec_uid = sec_uid_from_url(resolved_url)
-
-    if not target_sec_uid:
-        raise RuntimeError(
-            "这个分享链接展开后不是抖音用户主页。请在目标用户主页点“分享 → 复制链接”后再粘贴。"
-        )
+    resolved_url, target_sec_uid = await resolve_profile_url(url, cookie_dict)
 
     emit("status", "已识别用户主页，正在加载作品…")
     emit("log", f"用户 sec_uid：{target_sec_uid}")
@@ -185,13 +209,14 @@ async def scan(url: str, config_path: Path, output: Path, limit: int) -> int:
 
         await page.wait_for_timeout(3500)
 
-        # 再以浏览器最终地址校验一次，兼容抖音额外跳转。
+        # Browser may append query params or perform another redirect; log it for diagnostics.
         final_url = page.url
         final_sec_uid = sec_uid_from_url(final_url)
-        if final_sec_uid and final_sec_uid != target_sec_uid:
-            target_sec_uid = final_sec_uid
+        if final_sec_uid:
+            if final_sec_uid != target_sec_uid:
+                target_sec_uid = final_sec_uid
+                emit("log", f"最终 sec_uid：{target_sec_uid}")
             emit("log", f"浏览器最终主页：{final_url}")
-            emit("log", f"最终 sec_uid：{target_sec_uid}")
 
         body_text = ""
         try:
