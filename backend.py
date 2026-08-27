@@ -1,14 +1,11 @@
 from __future__ import annotations
 
-import os
-import subprocess
 import sys
 from pathlib import Path
 
 import yaml
 
 
-UPSTREAM_REPO = "https://github.com/jiji262/douyin-downloader.git"
 UPSTREAM_DIRNAME = "vendor/douyin-downloader"
 
 
@@ -21,11 +18,7 @@ class BackendManager:
         self.config_path = self.runtime_dir / "config.yml"
 
     def prepare_command(self) -> tuple[list[str], Path]:
-        if self.backend_dir.exists() and (self.backend_dir / ".git").exists():
-            return ["git", "pull", "--ff-only"], self.backend_dir
-
-        self.backend_dir.parent.mkdir(parents=True, exist_ok=True)
-        return ["git", "clone", "--depth", "1", UPSTREAM_REPO, str(self.backend_dir)], self.project_root
+        return [sys.executable, str(self.project_root / "bootstrap_backend.py")], self.project_root
 
     def ensure_backend(self):
         if not (self.backend_dir / "run.py").exists():
@@ -33,10 +26,6 @@ class BackendManager:
 
     def _python(self) -> str:
         return sys.executable
-
-    def install_dependencies_command(self) -> tuple[list[str], Path]:
-        self.ensure_backend()
-        return [self._python(), "-m", "pip", "install", "-r", "requirements.txt"], self.backend_dir
 
     def cookie_command(self) -> tuple[list[str], Path]:
         self.ensure_backend()
