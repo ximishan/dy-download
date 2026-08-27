@@ -31,11 +31,6 @@ class BackendManager:
         return sys.executable
 
     def _python_cmd(self, *args: str) -> list[str]:
-        """Run every Python child in UTF-8 mode.
-
-        This avoids Windows GBK failures in Rich output (for example ✓ / ✗)
-        and keeps stdout compatible with the GUI's UTF-8 pipe reader.
-        """
         return [self._python(), "-X", "utf8", *args]
 
     def prepare_command(self) -> tuple[list[str], Path]:
@@ -53,14 +48,13 @@ class BackendManager:
                 url="https://www.douyin.com/user/placeholder",
                 output_dir=Path.home() / "Downloads" / "dy-download",
                 count=0,
-                threads=5,
+                threads=3,
                 browser_fallback=True,
             )
         return self._python_cmd("-m", "tools.cookie_fetcher", "--config", str(self.config_path)), self.backend_dir
 
     @staticmethod
     def extract_douyin_url(text: str) -> str:
-        """Extract the first Douyin URL from a raw URL or copied share message."""
         raw = (text or "").strip()
         if not raw:
             return ""
@@ -108,7 +102,8 @@ class BackendManager:
 
     def download_command(self, config_path: Path) -> tuple[list[str], Path]:
         self.ensure_backend()
-        return self._python_cmd("run.py", "-c", str(config_path)), self.backend_dir
+        watchdog = self.resource_root / "safe_download.py"
+        return self._python_cmd(str(watchdog), "--config", str(config_path)), self.project_root
 
     def write_profile_config(
         self,
@@ -178,16 +173,25 @@ class BackendManager:
         cookies = self._read_existing_config().get("cookies", {})
         if not isinstance(cookies, dict) or not cookies:
             return "未配置"
+
+        required = ("ttwid", "odin_tt", "passport_csrf_token")
+        login_keys = ("sessionid", "sessionid_ss", "sid_guard")
+        missing = [key for key in required if not cookies.get(key)]
+        has_login = any(cookies.get(key) for key in login_keys)
+
+        if missing:
+            return f"风险：缺少 {', '.join(missing)}"
+        if not has_login:
+            return "风险：未检测到有效登录会话"
+
         important = [
-            k
-            for k in ("sessionid", "sid_guard", "ttwid", "msToken", "passport_csrf_token")
+            k for k in ("sessionid", "sid_guard", "ttwid", "msToken", "passport_csrf_token")
             if cookies.get(k)
         ]
-        return f"已配置 {len(cookies)} 项" + (f"（{', '.join(important)}）" if important else "")
+        return f"健康（{len(cookies)} 项，{', '.join(important)}）"
 
     @classmethod
     def validate_profile_url(cls, text: str) -> bool:
-        """Accept raw URL or complete Douyin share text containing a profile link."""
         try:
             url = cls.extract_douyin_url(text)
             if not url:
@@ -216,6 +220,7 @@ class BackendManager:
     ) -> Path:
         previous = self._read_existing_config()
         cookies = previous.get("cookies", {}) if isinstance(previous, dict) else {}
+        safe_threads = max(1, min(int(threads), 3))
         config = {
             "link": links,
             "path": str(output_dir.resolve()),
@@ -228,7 +233,8 @@ class BackendManager:
                 "collect": 0,
                 "collectmix": 0,
             },
-            "thread": int(threads),
+            "thread": safe_threads,
+            "rate_limit": 1.2,
             "retry_times": 3,
             "proxy": "",
             "database": True,
