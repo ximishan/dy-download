@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import re
 import shutil
 import sys
 from pathlib import Path
@@ -49,16 +50,48 @@ class BackendManager:
             )
         return [self._python(), "-m", "tools.cookie_fetcher", "--config", str(self.config_path)], self.backend_dir
 
+    @staticmethod
+    def extract_douyin_url(text: str) -> str:
+        """Extract the first Douyin URL from a raw URL or copied share message."""
+        raw = (text or "").strip()
+        if not raw:
+            return ""
+
+        # Normal share text usually contains a full https:// URL.
+        match = re.search(
+            r"https?://(?:[A-Za-z0-9-]+\.)?(?:douyin\.com|iesdouyin\.com)(?:/[^\s]*)?",
+            raw,
+            flags=re.IGNORECASE,
+        )
+        if match:
+            return match.group(0).rstrip("，。！？；;,.!?)）]】>\"'")
+
+        # Also accept a bare copied short link without scheme.
+        match = re.search(
+            r"(?:v\.douyin\.com|v\.iesdouyin\.com)/[^\s]+",
+            raw,
+            flags=re.IGNORECASE,
+        )
+        if match:
+            return "https://" + match.group(0).rstrip("，。！？；;,.!?)）]】>\"'")
+
+        return ""
+
     def scan_command(self, url: str, limit: int = 0) -> tuple[list[str], Path]:
         self.ensure_backend()
         if not self.config_path.exists():
             raise RuntimeError("请先点击“浏览器登录获取 Cookie”或手动填写 Cookie。")
+
+        extracted_url = self.extract_douyin_url(url)
+        if not extracted_url:
+            raise RuntimeError("没有从输入内容中找到有效的抖音链接。")
+
         script = self.resource_root / "scan_profile.py"
         cmd = [
             self._python(),
             str(script),
             "--url",
-            url,
+            extracted_url,
             "--config",
             str(self.config_path),
             "--output",
@@ -147,17 +180,22 @@ class BackendManager:
         ]
         return f"已配置 {len(cookies)} 项" + (f"（{', '.join(important)}）" if important else "")
 
-    @staticmethod
-    def validate_profile_url(url: str) -> bool:
-        """Accept both full profile URLs and Douyin profile share short links."""
+    @classmethod
+    def validate_profile_url(cls, text: str) -> bool:
+        """Accept raw URL or complete Douyin share text containing a profile link."""
         try:
-            parsed = urlparse(url.strip())
+            url = cls.extract_douyin_url(text)
+            if not url:
+                return False
+            parsed = urlparse(url)
             if parsed.scheme not in {"http", "https"}:
                 return False
             host = parsed.netloc.lower().split(":", 1)[0]
             if host in {"v.douyin.com", "v.iesdouyin.com"}:
                 return True
-            return host.endswith("douyin.com") and "/user/" in parsed.path
+            return (
+                host.endswith("douyin.com") or host.endswith("iesdouyin.com")
+            ) and ("/user/" in parsed.path or "/share/user/" in parsed.path)
         except Exception:
             return False
 
