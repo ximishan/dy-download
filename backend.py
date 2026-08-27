@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import sys
 from pathlib import Path
+from urllib.parse import urlparse
 
 import yaml
 
@@ -16,6 +17,7 @@ class BackendManager:
         self.runtime_dir = project_root / ".runtime"
         self.runtime_dir.mkdir(parents=True, exist_ok=True)
         self.config_path = self.runtime_dir / "config.yml"
+        self.scan_path = self.runtime_dir / "scan.json"
 
     def prepare_command(self) -> tuple[list[str], Path]:
         return [sys.executable, str(self.project_root / "bootstrap_backend.py")], self.project_root
@@ -24,26 +26,41 @@ class BackendManager:
         if not (self.backend_dir / "run.py").exists():
             raise RuntimeError("下载核心尚未安装，请先点击“安装/更新下载核心”。")
 
-    def _python(self) -> str:
-        return sys.executable
-
     def cookie_command(self) -> tuple[list[str], Path]:
         self.ensure_backend()
         if not self.config_path.exists():
-            self.write_config(
+            self.write_profile_config(
                 url="https://www.douyin.com/user/placeholder",
                 output_dir=Path.home() / "Downloads" / "dy-download",
                 count=0,
                 threads=5,
                 browser_fallback=True,
             )
-        return [self._python(), "-m", "tools.cookie_fetcher", "--config", str(self.config_path)], self.backend_dir
+        return [sys.executable, "-m", "tools.cookie_fetcher", "--config", str(self.config_path)], self.backend_dir
+
+    def scan_command(self, url: str, limit: int = 0) -> tuple[list[str], Path]:
+        self.ensure_backend()
+        if not self.config_path.exists():
+            raise RuntimeError("请先点击“浏览器登录获取 Cookie”。")
+        cmd = [
+            sys.executable,
+            str(self.project_root / "scan_profile.py"),
+            "--url",
+            url,
+            "--config",
+            str(self.config_path),
+            "--output",
+            str(self.scan_path),
+        ]
+        if limit > 0:
+            cmd += ["--limit", str(limit)]
+        return cmd, self.project_root
 
     def download_command(self, config_path: Path) -> tuple[list[str], Path]:
         self.ensure_backend()
-        return [self._python(), "run.py", "-c", str(config_path)], self.backend_dir
+        return [sys.executable, "run.py", "-c", str(config_path)], self.backend_dir
 
-    def write_config(
+    def write_profile_config(
         self,
         *,
         url: str,
@@ -52,15 +69,95 @@ class BackendManager:
         threads: int,
         browser_fallback: bool,
     ) -> Path:
+        return self._write_config(
+            links=[url],
+            output_dir=output_dir,
+            threads=threads,
+            browser_fallback=browser_fallback,
+            mode=["post"],
+            post_count=count,
+        )
+
+    def write_selected_config(
+        self,
+        *,
+        items: list[dict],
+        output_dir: Path,
+        threads: int,
+        browser_fallback: bool,
+    ) -> Path:
+        links: list[str] = []
+        for item in items:
+            aweme_id = str(item.get("aweme_id") or "").strip()
+            if not aweme_id:
+                continue
+            item_type = item.get("type")
+            if item_type == "图文":
+                links.append(f"https://www.douyin.com/note/{aweme_id}")
+            else:
+                links.append(f"https://www.douyin.com/video/{aweme_id}")
+        if not links:
+            raise RuntimeError("没有可下载的作品。")
+        return self._write_config(
+            links=links,
+            output_dir=output_dir,
+            threads=threads,
+            browser_fallback=browser_fallback,
+            mode=["post"],
+            post_count=0,
+        )
+
+    def save_manual_cookie(self, cookie_text: str) -> None:
+        cookie_text = cookie_text.strip()
+        if not cookie_text:
+            raise ValueError("Cookie 不能为空。")
+        parsed: dict[str, str] = {}
+        for chunk in cookie_text.split(";"):
+            if "=" not in chunk:
+                continue
+            key, value = chunk.split("=", 1)
+            key = key.strip()
+            if key:
+                parsed[key] = value.strip()
+        if not parsed:
+            raise ValueError("Cookie 格式不正确。")
+        data = self._read_existing_config()
+        data["cookies"] = parsed
+        self._dump_config(data)
+
+    def cookie_summary(self) -> str:
+        cookies = self._read_existing_config().get("cookies", {})
+        if not isinstance(cookies, dict) or not cookies:
+            return "未配置"
+        important = [k for k in ("sessionid", "sid_guard", "ttwid", "msToken", "passport_csrf_token") if cookies.get(k)]
+        return f"已配置 {len(cookies)} 项" + (f"（{', '.join(important)}）" if important else "")
+
+    @staticmethod
+    def validate_profile_url(url: str) -> bool:
+        try:
+            parsed = urlparse(url.strip())
+            return parsed.scheme in {"http", "https"} and "douyin.com" in parsed.netloc and "/user/" in parsed.path
+        except Exception:
+            return False
+
+    def _write_config(
+        self,
+        *,
+        links: list[str],
+        output_dir: Path,
+        threads: int,
+        browser_fallback: bool,
+        mode: list[str],
+        post_count: int,
+    ) -> Path:
         previous = self._read_existing_config()
         cookies = previous.get("cookies", {}) if isinstance(previous, dict) else {}
-
         config = {
-            "link": [url],
+            "link": links,
             "path": str(output_dir.resolve()),
-            "mode": ["post"],
+            "mode": mode,
             "number": {
-                "post": int(count),
+                "post": int(post_count),
                 "like": 0,
                 "mix": 0,
                 "music": 0,
@@ -73,13 +170,7 @@ class BackendManager:
             "database": True,
             "database_path": str((self.runtime_dir / "dy_downloader.db").resolve()),
             "progress": {"quiet_logs": False},
-            "cookies": cookies or {
-                "msToken": "",
-                "ttwid": "",
-                "odin_tt": "",
-                "passport_csrf_token": "",
-                "sid_guard": "",
-            },
+            "cookies": cookies or {},
             "browser_fallback": {
                 "enabled": bool(browser_fallback),
                 "headless": False,
@@ -89,10 +180,12 @@ class BackendManager:
             },
             "transcript": {"enabled": False},
         }
-
-        with self.config_path.open("w", encoding="utf-8") as fh:
-            yaml.safe_dump(config, fh, allow_unicode=True, sort_keys=False)
+        self._dump_config(config)
         return self.config_path
+
+    def _dump_config(self, data: dict) -> None:
+        with self.config_path.open("w", encoding="utf-8") as fh:
+            yaml.safe_dump(data, fh, allow_unicode=True, sort_keys=False)
 
     def _read_existing_config(self) -> dict:
         if not self.config_path.exists():
