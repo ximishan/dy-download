@@ -102,8 +102,9 @@ class BackendManager:
 
     def can_resume_download(self) -> bool:
         data = self._read_existing_config()
-        links = data.get("link") or [] if isinstance(data, dict) else []
-        return bool(links)
+        links = (data.get("link") or []) if isinstance(data, dict) else []
+        state = self.read_risk_state()
+        return bool(links) and bool(state.get("resumable"))
 
     def read_risk_state(self) -> dict:
         if not self.risk_state_path.exists():
@@ -113,6 +114,7 @@ class BackendManager:
                 "reason": "暂无风控信号",
                 "risk_hits": 0,
                 "needs_login": False,
+                "resumable": False,
             }
         try:
             data = json.loads(self.risk_state_path.read_text(encoding="utf-8"))
@@ -127,6 +129,7 @@ class BackendManager:
             "reason": "新的登录态已就绪",
             "risk_hits": 0,
             "needs_login": False,
+            "resumable": False,
         }
         self.risk_state_path.write_text(json.dumps(state, ensure_ascii=False, indent=2), encoding="utf-8")
 
@@ -149,10 +152,13 @@ class BackendManager:
             )
         if not links:
             raise RuntimeError("没有可下载的作品。")
-        return self._write_config(
+        path = self._write_config(
             links=links, output_dir=output_dir, threads=threads,
             browser_fallback=browser_fallback, mode=["post"], post_count=0,
         )
+        # A fresh selection is not resumable until the guarded download actually starts.
+        self.clear_risk_state()
+        return path
 
     def save_manual_cookie(self, cookie_text: str) -> None:
         cookie_text = cookie_text.strip()
