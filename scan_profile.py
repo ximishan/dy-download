@@ -11,6 +11,13 @@ from urllib.parse import parse_qs, urlparse
 import yaml
 from playwright.async_api import Response, async_playwright
 
+# Windows 子进程在 stdout 被管道接管时可能仍使用系统代码页（如 GBK）。
+# GUI 端统一按 UTF-8 读取，所以这里显式固定 UTF-8，避免标题/类型/日志乱码。
+if hasattr(sys.stdout, "reconfigure"):
+    sys.stdout.reconfigure(encoding="utf-8", errors="replace")
+if hasattr(sys.stderr, "reconfigure"):
+    sys.stderr.reconfigure(encoding="utf-8", errors="replace")
+
 ROOT = Path(__file__).resolve().parent
 UPSTREAM = ROOT / "vendor" / "douyin-downloader"
 if str(UPSTREAM) not in sys.path:
