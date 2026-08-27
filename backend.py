@@ -30,9 +30,17 @@ class BackendManager:
             return found
         return sys.executable
 
+    def _python_cmd(self, *args: str) -> list[str]:
+        """Run every Python child in UTF-8 mode.
+
+        This avoids Windows GBK failures in Rich output (for example ✓ / ✗)
+        and keeps stdout compatible with the GUI's UTF-8 pipe reader.
+        """
+        return [self._python(), "-X", "utf8", *args]
+
     def prepare_command(self) -> tuple[list[str], Path]:
         script = self.resource_root / "bootstrap_backend.py"
-        return [self._python(), str(script)], self.project_root
+        return self._python_cmd(str(script)), self.project_root
 
     def ensure_backend(self):
         if not (self.backend_dir / "run.py").exists():
@@ -48,7 +56,7 @@ class BackendManager:
                 threads=5,
                 browser_fallback=True,
             )
-        return [self._python(), "-m", "tools.cookie_fetcher", "--config", str(self.config_path)], self.backend_dir
+        return self._python_cmd("-m", "tools.cookie_fetcher", "--config", str(self.config_path)), self.backend_dir
 
     @staticmethod
     def extract_douyin_url(text: str) -> str:
@@ -57,7 +65,6 @@ class BackendManager:
         if not raw:
             return ""
 
-        # Normal share text usually contains a full https:// URL.
         match = re.search(
             r"https?://(?:[A-Za-z0-9-]+\.)?(?:douyin\.com|iesdouyin\.com)(?:/[^\s]*)?",
             raw,
@@ -66,7 +73,6 @@ class BackendManager:
         if match:
             return match.group(0).rstrip("，。！？；;,.!?)）]】>\"'")
 
-        # Also accept a bare copied short link without scheme.
         match = re.search(
             r"(?:v\.douyin\.com|v\.iesdouyin\.com)/[^\s]+",
             raw,
@@ -87,8 +93,7 @@ class BackendManager:
             raise RuntimeError("没有从输入内容中找到有效的抖音链接。")
 
         script = self.resource_root / "scan_profile.py"
-        cmd = [
-            self._python(),
+        cmd = self._python_cmd(
             str(script),
             "--url",
             extracted_url,
@@ -96,14 +101,14 @@ class BackendManager:
             str(self.config_path),
             "--output",
             str(self.scan_path),
-        ]
+        )
         if limit > 0:
             cmd += ["--limit", str(limit)]
         return cmd, self.project_root
 
     def download_command(self, config_path: Path) -> tuple[list[str], Path]:
         self.ensure_backend()
-        return [self._python(), "run.py", "-c", str(config_path)], self.backend_dir
+        return self._python_cmd("run.py", "-c", str(config_path)), self.backend_dir
 
     def write_profile_config(
         self,
