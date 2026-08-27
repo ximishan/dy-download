@@ -1,0 +1,36 @@
+name: build-windows
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+jobs:
+  build:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install -r requirements.txt pyinstaller
+
+      - name: Syntax check
+        run: |
+          python -m py_compile app.py backend.py bootstrap_backend.py scan_profile.py
+
+      - name: Build GUI
+        shell: cmd
+        run: |
+          python -m PyInstaller --noconfirm --clean --windowed --name dy-download --collect-all PySide6 --add-data "backend.py;." --add-data "bootstrap_backend.py;." --add-data "scan_profile.py;." app.py
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: dy-download-windows
+          path: dist/dy-download/
