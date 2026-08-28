@@ -43,7 +43,7 @@ python -m playwright install chromium
 if errorlevel 1 goto :fail
 
 echo [4/6] 语法检查...
-python -m py_compile launcher.py app.py backend.py bootstrap_backend.py scan_profile.py safe_download.py
+python -m py_compile launcher.py app.py backend.py bootstrap_backend.py scan_profile.py safe_download.py gui_cookie_login.py
 if errorlevel 1 goto :fail
 
 echo [5/6] 清理旧构建...
@@ -76,6 +76,7 @@ python -m PyInstaller ^
   --hidden-import aiofiles ^
   --hidden-import dateutil ^
   --hidden-import gmssl ^
+  --hidden-import gui_cookie_login ^
   --add-data "vendor\douyin-downloader;vendor\douyin-downloader" ^
   --add-data "ms-playwright;ms-playwright" ^
   launcher.py
