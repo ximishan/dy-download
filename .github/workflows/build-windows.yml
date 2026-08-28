@@ -41,15 +41,23 @@ jobs:
           python -m playwright install chromium
           if (!(Test-Path 'ms-playwright')) { throw 'Playwright browser bundle missing' }
 
+          # We always launch a visible Chromium window for QR login/browser fallback.
+          # Modern Playwright also downloads a separate headless shell which duplicates
+          # a large part of Chromium and is not used by this application.
+          Get-ChildItem 'ms-playwright' -Directory -Filter 'chromium_headless_shell-*' -ErrorAction SilentlyContinue | ForEach-Object {
+            Write-Host "Removing unused Playwright headless shell: $($_.FullName)"
+            Remove-Item -Recurse -Force $_.FullName
+          }
+
       - name: Syntax check
         shell: pwsh
         run: |
           python -m py_compile launcher.py app.py backend.py bootstrap_backend.py scan_profile.py safe_download.py gui_cookie_login.py
 
-      - name: Build standalone GUI
+      - name: Build slim standalone GUI
         shell: cmd
         run: |
-          python -m PyInstaller --noconfirm --clean --windowed --onedir --name dy-download --paths "vendor\douyin-downloader" --collect-all PySide6 --collect-all playwright --collect-all aiohttp --collect-all httpx --collect-all rich --collect-all imageio_ffmpeg --collect-submodules core --collect-submodules cli --collect-submodules auth --collect-submodules control --collect-submodules tools --collect-submodules utils --collect-submodules database --hidden-import yaml --hidden-import aiosqlite --hidden-import aiofiles --hidden-import dateutil --hidden-import gmssl --hidden-import gui_cookie_login --add-data "vendor\douyin-downloader;vendor\douyin-downloader" --add-data "ms-playwright;ms-playwright" launcher.py
+          python -m PyInstaller --noconfirm --clean --windowed --onedir --name dy-download --paths "vendor\douyin-downloader" --hidden-import PySide6.QtCore --hidden-import PySide6.QtGui --hidden-import PySide6.QtWidgets --collect-all playwright --collect-all aiohttp --collect-all httpx --collect-all rich --collect-submodules core --collect-submodules cli --collect-submodules auth --collect-submodules control --collect-submodules tools --collect-submodules utils --collect-submodules database --hidden-import yaml --hidden-import aiosqlite --hidden-import aiofiles --hidden-import dateutil --hidden-import gmssl --hidden-import gui_cookie_login --exclude-module PySide6.QtWebEngineCore --exclude-module PySide6.QtWebEngineWidgets --exclude-module PySide6.QtWebEngineQuick --exclude-module PySide6.QtQml --exclude-module PySide6.QtQuick --exclude-module PySide6.QtQuickWidgets --exclude-module PySide6.QtMultimedia --exclude-module PySide6.QtMultimediaWidgets --exclude-module PySide6.QtCharts --exclude-module PySide6.QtDataVisualization --exclude-module PySide6.Qt3DCore --exclude-module PySide6.Qt3DRender --exclude-module PySide6.QtPdf --exclude-module PySide6.QtPdfWidgets --add-data "vendor\douyin-downloader;vendor\douyin-downloader" --add-data "ms-playwright;ms-playwright" launcher.py
 
       - name: Verify standalone bundle layout
         shell: pwsh
@@ -58,18 +66,41 @@ jobs:
           $resourceRoot = 'dist/dy-download/_internal'
           if (!(Test-Path "$resourceRoot/vendor/douyin-downloader/run.py")) { throw 'embedded downloader core missing' }
           if (!(Test-Path "$resourceRoot/ms-playwright")) { throw 'embedded Chromium missing' }
-          Get-ChildItem dist/dy-download -Recurse | Measure-Object -Property Length -Sum | ForEach-Object {
-            Write-Host ("Bundle size: {0:N1} MB" -f ($_.Sum / 1MB))
-          }
 
-      - name: Package ZIP
+          $bundleBytes = (Get-ChildItem dist/dy-download -Recurse -File | Measure-Object -Property Length -Sum).Sum
+          Write-Host ("Slim bundle size: {0:N1} MB" -f ($bundleBytes / 1MB))
+
+      - name: Install Inno Setup
         shell: pwsh
         run: |
-          Compress-Archive -Path dist/dy-download/* -DestinationPath dist/dy-download-windows-standalone.zip -Force
+          choco install innosetup -y --no-progress
 
-      - name: Upload standalone artifact
+      - name: Build single installer EXE
+        shell: pwsh
+        run: |
+          $iscc = "${env:ProgramFiles(x86)}\Inno Setup 6\ISCC.exe"
+          if (!(Test-Path $iscc)) { throw "ISCC.exe missing: $iscc" }
+          & $iscc installer.iss
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          if (!(Test-Path 'dist/dy-download-Setup.exe')) { throw 'installer exe missing' }
+          $installer = Get-Item 'dist/dy-download-Setup.exe'
+          Write-Host ("Installer size: {0:N1} MB" -f ($installer.Length / 1MB))
+
+      - name: Package portable ZIP
+        shell: pwsh
+        run: |
+          Compress-Archive -Path dist/dy-download/* -DestinationPath dist/dy-download-windows-portable.zip -Force
+
+      - name: Upload installer
         uses: actions/upload-artifact@v4
         with:
-          name: dy-download-windows-standalone
-          path: dist/dy-download-windows-standalone.zip
+          name: dy-download-windows-installer
+          path: dist/dy-download-Setup.exe
+          retention-days: 14
+
+      - name: Upload portable ZIP
+        uses: actions/upload-artifact@v4
+        with:
+          name: dy-download-windows-portable
+          path: dist/dy-download-windows-portable.zip
           retention-days: 14
