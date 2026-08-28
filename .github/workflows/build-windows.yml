@@ -1,4 +1,4 @@
-name: build-windows
+name: build-windows-standalone
 
 on:
   push:
@@ -8,29 +8,68 @@ on:
 jobs:
   build:
     runs-on: windows-latest
-    steps:
-      - uses: actions/checkout@v4
+    timeout-minutes: 45
 
-      - uses: actions/setup-python@v5
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Python
+        uses: actions/setup-python@v5
         with:
           python-version: '3.11'
+          cache: 'pip'
 
-      - name: Install dependencies
+      - name: Install app and build dependencies
+        shell: pwsh
         run: |
           python -m pip install --upgrade pip
           python -m pip install -r requirements.txt pyinstaller
 
-      - name: Syntax check
+      - name: Fetch upstream downloader core
+        shell: pwsh
         run: |
-          python -m py_compile app.py backend.py bootstrap_backend.py scan_profile.py
+          New-Item -ItemType Directory -Force -Path vendor | Out-Null
+          if (Test-Path 'vendor/douyin-downloader') { Remove-Item -Recurse -Force 'vendor/douyin-downloader' }
+          git clone --depth 1 https://github.com/jiji262/douyin-downloader.git vendor/douyin-downloader
+          python -m pip install -r vendor/douyin-downloader/requirements.txt
 
-      - name: Build GUI
+      - name: Install bundled Playwright Chromium
+        shell: pwsh
+        run: |
+          $env:PLAYWRIGHT_BROWSERS_PATH = "$pwd/ms-playwright"
+          python -m playwright install chromium
+          if (!(Test-Path 'ms-playwright')) { throw 'Playwright browser bundle missing' }
+
+      - name: Syntax check
+        shell: pwsh
+        run: |
+          python -m py_compile launcher.py app.py backend.py bootstrap_backend.py scan_profile.py safe_download.py
+
+      - name: Build standalone GUI
         shell: cmd
         run: |
-          python -m PyInstaller --noconfirm --clean --windowed --name dy-download --collect-all PySide6 --add-data "backend.py;." --add-data "bootstrap_backend.py;." --add-data "scan_profile.py;." app.py
+          python -m PyInstaller --noconfirm --clean --windowed --onedir --name dy-download --paths "vendor\douyin-downloader" --collect-all PySide6 --collect-all playwright --collect-all aiohttp --collect-all httpx --collect-all rich --collect-all imageio_ffmpeg --collect-submodules core --collect-submodules cli --collect-submodules auth --collect-submodules control --collect-submodules tools --collect-submodules utils --collect-submodules database --hidden-import yaml --hidden-import aiosqlite --hidden-import aiofiles --hidden-import dateutil --hidden-import gmssl --add-data "vendor\douyin-downloader;vendor\douyin-downloader" --add-data "ms-playwright;ms-playwright" launcher.py
 
-      - name: Upload artifact
+      - name: Verify standalone bundle layout
+        shell: pwsh
+        run: |
+          if (!(Test-Path 'dist/dy-download/dy-download.exe')) { throw 'dy-download.exe missing' }
+          $resourceRoot = 'dist/dy-download/_internal'
+          if (!(Test-Path "$resourceRoot/vendor/douyin-downloader/run.py")) { throw 'embedded downloader core missing' }
+          if (!(Test-Path "$resourceRoot/ms-playwright")) { throw 'embedded Chromium missing' }
+          Get-ChildItem dist/dy-download -Recurse | Measure-Object -Property Length -Sum | ForEach-Object {
+            Write-Host ("Bundle size: {0:N1} MB" -f ($_.Sum / 1MB))
+          }
+
+      - name: Package ZIP
+        shell: pwsh
+        run: |
+          Compress-Archive -Path dist/dy-download/* -DestinationPath dist/dy-download-windows-standalone.zip -Force
+
+      - name: Upload standalone artifact
         uses: actions/upload-artifact@v4
         with:
-          name: dy-download-windows
-          path: dist/dy-download/
+          name: dy-download-windows-standalone
+          path: dist/dy-download-windows-standalone.zip
+          retention-days: 14
