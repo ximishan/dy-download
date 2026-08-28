@@ -51,10 +51,21 @@ def _login_detected(cookies: dict[str, str]) -> bool:
     return any(cookies.get(key) for key in LOGIN_KEYS)
 
 
+async def _safe_close(context, browser) -> None:
+    try:
+        await context.close()
+    except Exception:
+        pass
+    try:
+        await browser.close()
+    except Exception:
+        pass
+
+
 async def run_login(config_path: Path, timeout_seconds: int) -> int:
     _emit("[扫码登录] 正在打开抖音登录页面…")
     _emit("[扫码登录] 请在打开的浏览器中使用抖音 App 扫码并确认登录。")
-    _emit("[扫码登录] 登录成功后无需返回程序按 Enter，程序会自动检测并保存 Cookie。")
+    _emit("[扫码登录] 登录成功后无需按 Enter，程序会自动保存 Cookie。")
 
     async with async_playwright() as p:
         browser = await p.chromium.launch(headless=False)
@@ -67,51 +78,96 @@ async def run_login(config_path: Path, timeout_seconds: int) -> int:
         try:
             await page.goto(LOGIN_URL, wait_until="domcontentloaded", timeout=60000)
         except Exception as exc:
-            _emit(f"[扫码登录] 页面加载提示：{exc}")
+            _emit(f"[扫码登录] 页面加载提示：{type(exc).__name__}: {exc}")
 
         deadline = asyncio.get_running_loop().time() + timeout_seconds
+        login_seen = False
+        first_login_at = 0.0
+        best_cookies: dict[str, str] = {}
         last_missing = ""
 
         while asyncio.get_running_loop().time() < deadline:
             if page.is_closed():
                 _emit("[扫码登录] 浏览器窗口已关闭，登录取消。")
-                await context.close()
-                await browser.close()
+                await _safe_close(context, browser)
                 return 2
 
-            raw = await context.cookies()
-            cookies = _cookie_dict(raw)
+            try:
+                raw = await context.cookies()
+                cookies = _cookie_dict(raw)
+            except Exception as exc:
+                _emit(f"[扫码登录] 读取 Cookie 异常：{type(exc).__name__}: {exc}")
+                await asyncio.sleep(1.0)
+                continue
+
+            if len(cookies) > len(best_cookies):
+                best_cookies = dict(cookies)
 
             if _login_detected(cookies):
-                # Give Douyin a short grace period to populate anti-CSRF / device cookies.
-                await page.wait_for_timeout(2500)
-                try:
-                    await page.reload(wait_until="domcontentloaded", timeout=30000)
-                except Exception:
-                    pass
-                await page.wait_for_timeout(1500)
+                now = asyncio.get_running_loop().time()
+                if not login_seen:
+                    login_seen = True
+                    first_login_at = now
+                    _emit("[扫码登录] 已检测到登录成功，正在等待 Cookie 稳定…")
 
-                cookies = _cookie_dict(await context.cookies())
+                    # Do NOT reload here. Douyin may still be finalising the QR-login
+                    # session, and an immediate reload can interrupt that flow.
+                    try:
+                        _save_config(config_path, cookies)
+                        _emit(f"[扫码登录] 已先保存登录会话（{len(cookies)} 项 Cookie）。")
+                    except Exception as exc:
+                        _emit(f"[扫码登录] 保存 Cookie 异常：{type(exc).__name__}: {exc}")
+                        await _safe_close(context, browser)
+                        return 4
+
                 missing = [key for key in REQUIRED_KEYS if not cookies.get(key)]
-                if missing:
-                    missing_text = ", ".join(missing)
-                    if missing_text != last_missing:
-                        _emit(f"[扫码登录] 已检测到登录会话，正在等待关键 Cookie：{missing_text}")
-                        last_missing = missing_text
-                    await asyncio.sleep(1.5)
-                    continue
+                if not missing:
+                    try:
+                        _save_config(config_path, cookies)
+                    except Exception as exc:
+                        _emit(f"[扫码登录] 最终保存 Cookie 异常：{type(exc).__name__}: {exc}")
+                        await _safe_close(context, browser)
+                        return 4
+                    _emit(f"[扫码登录] 登录成功，已保存 {len(cookies)} 项 Cookie。")
+                    await _safe_close(context, browser)
+                    return 0
 
-                _save_config(config_path, cookies)
-                _emit(f"[扫码登录] 登录成功，已保存 {len(cookies)} 项 Cookie。")
-                await context.close()
-                await browser.close()
-                return 0
+                missing_text = ", ".join(missing)
+                if missing_text != last_missing:
+                    _emit(f"[扫码登录] 登录已成功，继续等待关键 Cookie：{missing_text}")
+                    last_missing = missing_text
+
+                # Do not hold the user in the login window forever just because one
+                # auxiliary cookie did not appear. The core can often refresh/generate
+                # non-session values later. A valid session is the important part.
+                if login_seen and now - first_login_at >= 8.0:
+                    final_cookies = cookies if len(cookies) >= len(best_cookies) else best_cookies
+                    try:
+                        _save_config(config_path, final_cookies)
+                    except Exception as exc:
+                        _emit(f"[扫码登录] 保存 Cookie 异常：{type(exc).__name__}: {exc}")
+                        await _safe_close(context, browser)
+                        return 4
+                    _emit(
+                        f"[扫码登录] 登录会话已保存，共 {len(final_cookies)} 项 Cookie；"
+                        f"缺少的辅助字段将由后续请求继续补齐：{missing_text}"
+                    )
+                    await _safe_close(context, browser)
+                    return 0
 
             await asyncio.sleep(1.0)
 
+        if login_seen and best_cookies:
+            try:
+                _save_config(config_path, best_cookies)
+                _emit(f"[扫码登录] 已保存检测到的登录会话，共 {len(best_cookies)} 项 Cookie。")
+                await _safe_close(context, browser)
+                return 0
+            except Exception as exc:
+                _emit(f"[扫码登录] 超时前保存 Cookie 异常：{type(exc).__name__}: {exc}")
+
         _emit("[扫码登录] 等待登录超时，请重新点击“浏览器登录获取 Cookie”后再试。")
-        await context.close()
-        await browser.close()
+        await _safe_close(context, browser)
         return 3
 
 
@@ -126,7 +182,7 @@ def main() -> int:
     except KeyboardInterrupt:
         return 130
     except Exception as exc:
-        _emit(f"[扫码登录] 登录流程异常：{exc}")
+        _emit(f"[扫码登录] 登录流程异常：{type(exc).__name__}: {exc}")
         return 1
 
 
