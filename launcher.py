@@ -6,18 +6,39 @@ import sys
 from pathlib import Path
 
 
+def _force_utf8_stdio() -> None:
+    """Keep every frozen/internal worker on the same UTF-8 pipe encoding.
+
+    PYTHONIOENCODING/PYTHONUTF8 are read during interpreter startup, so merely
+    setting them after a frozen EXE has launched is not enough. Reconfigure the
+    already-created streams explicitly before any internal task prints output.
+    """
+    for stream_name in ("stdout", "stderr"):
+        stream = getattr(sys, stream_name, None)
+        if stream is None or not hasattr(stream, "reconfigure"):
+            continue
+        try:
+            stream.reconfigure(encoding="utf-8", errors="replace")
+        except Exception:
+            pass
+
+
 def resource_root() -> Path:
     return Path(getattr(sys, "_MEIPASS", Path(__file__).resolve().parent))
 
 
 def prepare_embedded_runtime() -> Path:
+    _force_utf8_stdio()
+
     root = resource_root()
     browser_dir = root / "ms-playwright"
     if browser_dir.exists():
         os.environ["PLAYWRIGHT_BROWSERS_PATH"] = str(browser_dir)
 
-    os.environ.setdefault("PYTHONUTF8", "1")
-    os.environ.setdefault("PYTHONIOENCODING", "utf-8")
+    # These variables still help subprocesses and imported libraries, while
+    # _force_utf8_stdio() above fixes the current frozen process immediately.
+    os.environ["PYTHONUTF8"] = "1"
+    os.environ["PYTHONIOENCODING"] = "utf-8"
 
     vendor = root / "vendor" / "douyin-downloader"
     if vendor.exists() and str(vendor) not in sys.path:
@@ -80,6 +101,12 @@ def internal_dispatch() -> int | None:
 
 
 def main() -> int:
+    # Configure even the normal GUI launch early; any later self-spawned
+    # internal worker will inherit a UTF-8-friendly environment.
+    _force_utf8_stdio()
+    os.environ["PYTHONUTF8"] = "1"
+    os.environ["PYTHONIOENCODING"] = "utf-8"
+
     internal_code = internal_dispatch()
     if internal_code is not None:
         return internal_code
