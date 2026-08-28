@@ -11,7 +11,7 @@ from pathlib import Path
 
 import yaml
 
-ROOT = Path(__file__).resolve().parent
+ROOT = Path(getattr(sys, "_MEIPASS", Path(__file__).resolve().parent))
 UPSTREAM = ROOT / "vendor" / "douyin-downloader"
 
 RISK_PATTERNS = [
@@ -44,7 +44,10 @@ def cookie_health(config: dict) -> tuple[bool, str]:
     return True, "Cookie 基础健康检查通过"
 
 
-def write_state(path: Path | None, *, level: str, status: str, reason: str, hits: int, needs_login: bool, resumable: bool) -> None:
+def write_state(
+    path: Path | None, *, level: str, status: str, reason: str,
+    hits: int, needs_login: bool, resumable: bool,
+) -> None:
     if not path:
         return
     payload = {
@@ -85,7 +88,7 @@ def main() -> int:
             risk_state_path, level="medium", status="核心缺失", reason="下载核心不存在",
             hits=0, needs_login=False, resumable=True,
         )
-        print("[风控保护] 下载核心不存在，请先安装/更新下载核心。", flush=True)
+        print("[风控保护] 下载核心不存在，请重新下载完整发行包。", flush=True)
         return 2
 
     write_state(
@@ -98,12 +101,23 @@ def main() -> int:
     env["PYTHONIOENCODING"] = "utf-8"
     env.setdefault("TERM", "dumb")
 
-    command = [sys.executable, "-X", "utf8", "run.py", "-c", str(config_path)]
+    if getattr(sys, "frozen", False):
+        command = [
+            sys.executable,
+            "--internal-upstream-download",
+            "-c",
+            str(config_path),
+        ]
+        cwd = Path(sys.executable).resolve().parent
+    else:
+        command = [sys.executable, "-X", "utf8", "run.py", "-c", str(config_path)]
+        cwd = UPSTREAM
+
     print("[风控保护] 已启用保守模式：并发<=3，API 速率约 1.2 次/秒。", flush=True)
 
     proc = subprocess.Popen(
         command,
-        cwd=UPSTREAM,
+        cwd=cwd,
         stdout=subprocess.PIPE,
         stderr=subprocess.STDOUT,
         text=True,
@@ -111,6 +125,7 @@ def main() -> int:
         errors="replace",
         bufsize=1,
         env=env,
+        creationflags=subprocess.CREATE_NO_WINDOW if sys.platform == "win32" else 0,
     )
 
     assert proc.stdout is not None
