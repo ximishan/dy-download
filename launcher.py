@@ -7,12 +7,7 @@ from pathlib import Path
 
 
 def _force_utf8_stdio() -> None:
-    """Keep every frozen/internal worker on the same UTF-8 pipe encoding.
-
-    PYTHONIOENCODING/PYTHONUTF8 are read during interpreter startup, so merely
-    setting them after a frozen EXE has launched is not enough. Reconfigure the
-    already-created streams explicitly before any internal task prints output.
-    """
+    """Keep every frozen/internal worker on the same UTF-8 pipe encoding."""
     for stream_name in ("stdout", "stderr"):
         stream = getattr(sys, stream_name, None)
         if stream is None or not hasattr(stream, "reconfigure"):
@@ -35,8 +30,6 @@ def prepare_embedded_runtime() -> Path:
     if browser_dir.exists():
         os.environ["PLAYWRIGHT_BROWSERS_PATH"] = str(browser_dir)
 
-    # These variables still help subprocesses and imported libraries, while
-    # _force_utf8_stdio() above fixes the current frozen process immediately.
     os.environ["PYTHONUTF8"] = "1"
     os.environ["PYTHONIOENCODING"] = "utf-8"
 
@@ -80,12 +73,12 @@ def internal_dispatch() -> int | None:
         return int(safe_main())
 
     if "--internal-cookie" in sys.argv:
-        sys.argv = ["cookie_fetcher", *_args_after("--internal-cookie")]
-        try:
-            runpy.run_module("tools.cookie_fetcher", run_name="__main__")
-        except SystemExit as exc:
-            return int(exc.code or 0)
-        return 0
+        # The upstream cookie_fetcher is terminal-driven and waits for Enter.
+        # A --windowed PyInstaller EXE has no reliable stdin, so use our
+        # GUI-friendly auto-detecting QR login flow instead.
+        sys.argv = ["gui_cookie_login.py", *_args_after("--internal-cookie")]
+        from gui_cookie_login import main as cookie_main
+        return int(cookie_main())
 
     if "--internal-upstream-download" in sys.argv:
         args = _args_after("--internal-upstream-download")
@@ -101,8 +94,6 @@ def internal_dispatch() -> int | None:
 
 
 def main() -> int:
-    # Configure even the normal GUI launch early; any later self-spawned
-    # internal worker will inherit a UTF-8-friendly environment.
     _force_utf8_stdio()
     os.environ["PYTHONUTF8"] = "1"
     os.environ["PYTHONIOENCODING"] = "utf-8"
