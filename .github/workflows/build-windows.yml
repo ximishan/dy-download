@@ -44,12 +44,12 @@ jobs:
       - name: Syntax check
         shell: pwsh
         run: |
-          python -m py_compile launcher.py app.py backend.py bootstrap_backend.py scan_profile.py safe_download.py
+          python -m py_compile launcher.py app.py backend.py bootstrap_backend.py scan_profile.py safe_download.py gui_cookie_login.py
 
       - name: Build standalone GUI
         shell: cmd
         run: |
-          python -m PyInstaller --noconfirm --clean --windowed --onedir --name dy-download --paths "vendor\douyin-downloader" --collect-all PySide6 --collect-all playwright --collect-all aiohttp --collect-all httpx --collect-all rich --collect-all imageio_ffmpeg --collect-submodules core --collect-submodules cli --collect-submodules auth --collect-submodules control --collect-submodules tools --collect-submodules utils --collect-submodules database --hidden-import yaml --hidden-import aiosqlite --hidden-import aiofiles --hidden-import dateutil --hidden-import gmssl --add-data "vendor\douyin-downloader;vendor\douyin-downloader" --add-data "ms-playwright;ms-playwright" launcher.py
+          python -m PyInstaller --noconfirm --clean --windowed --onedir --name dy-download --paths "vendor\douyin-downloader" --collect-all PySide6 --collect-all playwright --collect-all aiohttp --collect-all httpx --collect-all rich --collect-all imageio_ffmpeg --collect-submodules core --collect-submodules cli --collect-submodules auth --collect-submodules control --collect-submodules tools --collect-submodules utils --collect-submodules database --hidden-import yaml --hidden-import aiosqlite --hidden-import aiofiles --hidden-import dateutil --hidden-import gmssl --hidden-import gui_cookie_login --add-data "vendor\douyin-downloader;vendor\douyin-downloader" --add-data "ms-playwright;ms-playwright" launcher.py
 
       - name: Verify standalone bundle layout
         shell: pwsh
