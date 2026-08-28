@@ -16,31 +16,45 @@ UPSTREAM_DIRNAME = "vendor/douyin-downloader"
 class BackendManager:
     def __init__(self, project_root: Path):
         self.project_root = project_root
+        self.frozen = bool(getattr(sys, "frozen", False))
         self.resource_root = Path(getattr(sys, "_MEIPASS", project_root))
-        self.backend_dir = project_root / UPSTREAM_DIRNAME
-        self.runtime_dir = project_root / ".runtime"
+        # 源码模式使用仓库内 vendor；EXE 模式使用 PyInstaller 打包进去的 vendor。
+        self.backend_dir = (
+            self.resource_root / UPSTREAM_DIRNAME
+            if self.frozen
+            else project_root / UPSTREAM_DIRNAME
+        )
+        # 运行数据必须写到 EXE 所在目录，不能写 _MEIPASS 临时目录。
+        self.runtime_dir = (
+            Path(sys.executable).resolve().parent / ".runtime"
+            if self.frozen
+            else project_root / ".runtime"
+        )
         self.runtime_dir.mkdir(parents=True, exist_ok=True)
         self.config_path = self.runtime_dir / "config.yml"
         self.scan_path = self.runtime_dir / "scan.json"
         self.risk_state_path = self.runtime_dir / "risk_state.json"
 
     def _python(self) -> str:
-        if getattr(sys, "frozen", False):
-            found = shutil.which("python") or shutil.which("py")
-            if not found:
-                raise RuntimeError("EXE 版本当前仍需要系统安装 Python 3.10+。")
-            return found
+        if self.frozen:
+            return sys.executable
         return sys.executable
 
     def _python_cmd(self, *args: str) -> list[str]:
+        if self.frozen:
+            return [sys.executable, *args]
         return [self._python(), "-X", "utf8", *args]
 
     def prepare_command(self) -> tuple[list[str], Path]:
+        if self.frozen:
+            return [sys.executable, "--internal-selfcheck"], Path(sys.executable).resolve().parent
         script = self.resource_root / "bootstrap_backend.py"
         return self._python_cmd(str(script)), self.project_root
 
     def ensure_backend(self):
         if not (self.backend_dir / "run.py").exists():
+            if self.frozen:
+                raise RuntimeError("EXE 内置下载核心缺失，请重新下载完整发行包。")
             raise RuntimeError("下载核心尚未安装，请先点击“安装/更新下载核心”。")
 
     def cookie_command(self) -> tuple[list[str], Path]:
@@ -53,7 +67,16 @@ class BackendManager:
                 threads=3,
                 browser_fallback=True,
             )
-        return self._python_cmd("-m", "tools.cookie_fetcher", "--config", str(self.config_path)), self.backend_dir
+        if self.frozen:
+            return [
+                sys.executable,
+                "--internal-cookie",
+                "--config",
+                str(self.config_path),
+            ], Path(sys.executable).resolve().parent
+        return self._python_cmd(
+            "-m", "tools.cookie_fetcher", "--config", str(self.config_path)
+        ), self.backend_dir
 
     @staticmethod
     def extract_douyin_url(text: str) -> str:
@@ -83,28 +106,36 @@ class BackendManager:
         extracted_url = self.extract_douyin_url(url)
         if not extracted_url:
             raise RuntimeError("没有从输入内容中找到有效的抖音链接。")
-        script = self.resource_root / "scan_profile.py"
-        cmd = self._python_cmd(
-            str(script), "--url", extracted_url, "--config", str(self.config_path),
+
+        args = [
+            "--url", extracted_url,
+            "--config", str(self.config_path),
             "--output", str(self.scan_path),
-        )
+        ]
         if limit > 0:
-            cmd += ["--limit", str(limit)]
-        return cmd, self.project_root
+            args += ["--limit", str(limit)]
+
+        if self.frozen:
+            return [sys.executable, "--internal-scan", *args], Path(sys.executable).resolve().parent
+
+        script = self.resource_root / "scan_profile.py"
+        return self._python_cmd(str(script), *args), self.project_root
 
     def download_command(self, config_path: Path | None = None) -> tuple[list[str], Path]:
         self.ensure_backend()
         config_path = config_path or self.config_path
+        args = [
+            "--config", str(config_path),
+            "--risk-state", str(self.risk_state_path),
+        ]
+        if self.frozen:
+            return [sys.executable, "--internal-safe-download", *args], Path(sys.executable).resolve().parent
         watchdog = self.resource_root / "safe_download.py"
-        return self._python_cmd(
-            str(watchdog), "--config", str(config_path), "--risk-state", str(self.risk_state_path)
-        ), self.project_root
+        return self._python_cmd(str(watchdog), *args), self.project_root
 
     def can_resume_download(self) -> bool:
-        data = self._read_existing_config()
-        links = (data.get("link") or []) if isinstance(data, dict) else []
         state = self.read_risk_state()
-        return bool(links) and bool(state.get("resumable"))
+        return bool(state.get("resumable")) and self.config_path.exists()
 
     def read_risk_state(self) -> dict:
         if not self.risk_state_path.exists():
@@ -129,17 +160,23 @@ class BackendManager:
             "reason": "新的登录态已就绪",
             "risk_hits": 0,
             "needs_login": False,
-            "resumable": False,
+            "resumable": self.config_path.exists(),
         }
-        self.risk_state_path.write_text(json.dumps(state, ensure_ascii=False, indent=2), encoding="utf-8")
+        self.risk_state_path.write_text(
+            json.dumps(state, ensure_ascii=False, indent=2), encoding="utf-8"
+        )
 
-    def write_profile_config(self, *, url: str, output_dir: Path, count: int, threads: int, browser_fallback: bool) -> Path:
+    def write_profile_config(
+        self, *, url: str, output_dir: Path, count: int, threads: int, browser_fallback: bool
+    ) -> Path:
         return self._write_config(
             links=[url], output_dir=output_dir, threads=threads,
             browser_fallback=browser_fallback, mode=["post"], post_count=count,
         )
 
-    def write_selected_config(self, *, items: list[dict], output_dir: Path, threads: int, browser_fallback: bool) -> Path:
+    def write_selected_config(
+        self, *, items: list[dict], output_dir: Path, threads: int, browser_fallback: bool
+    ) -> Path:
         links: list[str] = []
         for item in items:
             aweme_id = str(item.get("aweme_id") or "").strip()
@@ -156,8 +193,18 @@ class BackendManager:
             links=links, output_dir=output_dir, threads=threads,
             browser_fallback=browser_fallback, mode=["post"], post_count=0,
         )
-        # A fresh selection is not resumable until the guarded download actually starts.
-        self.clear_risk_state()
+        state = self.read_risk_state()
+        state.update({
+            "level": "low",
+            "status": "等待下载",
+            "reason": "任务已创建",
+            "risk_hits": 0,
+            "needs_login": False,
+            "resumable": True,
+        })
+        self.risk_state_path.write_text(
+            json.dumps(state, ensure_ascii=False, indent=2), encoding="utf-8"
+        )
         return path
 
     def save_manual_cookie(self, cookie_text: str) -> None:
@@ -215,7 +262,10 @@ class BackendManager:
         except Exception:
             return False
 
-    def _write_config(self, *, links: list[str], output_dir: Path, threads: int, browser_fallback: bool, mode: list[str], post_count: int) -> Path:
+    def _write_config(
+        self, *, links: list[str], output_dir: Path, threads: int,
+        browser_fallback: bool, mode: list[str], post_count: int
+    ) -> Path:
         previous = self._read_existing_config()
         cookies = previous.get("cookies", {}) if isinstance(previous, dict) else {}
         safe_threads = max(1, min(int(threads), 3))
@@ -223,7 +273,10 @@ class BackendManager:
             "link": links,
             "path": str(output_dir.resolve()),
             "mode": mode,
-            "number": {"post": int(post_count), "like": 0, "mix": 0, "music": 0, "collect": 0, "collectmix": 0},
+            "number": {
+                "post": int(post_count), "like": 0, "mix": 0,
+                "music": 0, "collect": 0, "collectmix": 0,
+            },
             "thread": safe_threads,
             "rate_limit": 1.2,
             "retry_times": 3,
